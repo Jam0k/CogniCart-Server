@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard</title>
+    <link
+      href="https://maxcdn.bootstrapcdn.com/bootstrap/4.5.2/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+    <style>
+      .card {
+        margin-bottom: 20px;
+      }
+    </style>
+  </head>
+
+  <body>
+    <div class="container mt-4">
+      <div class="text-center mb-4">
+        <img src="../static/logo.png" width="150" />
+        <h1>Dashboard</h1>
+      </div>
+
+      <div class="d-flex justify-content-center mb-3">
+        <label for="deviceDropdown" class="mr-2">Select Device</label>
+        <select id="deviceDropdown" class="form-control w-auto">
+          <option value="1">Device 1</option>
+          <option value="2">Device 2</option>
+          <option value="3">Device 3</option>
+        </select>
+      </div>
+
+      <div class="text-center mb-3">
+        <button onclick="checkHealth()" class="btn btn-primary">
+          Check Health
+        </button>
+        <button onclick="networkSettings()" class="btn btn-primary">
+          Network Settings
+        </button>
+        <button onclick="ntpCheck()" class="btn btn-primary">NTP Check</button>
+        <button onclick="checkCamera()" class="btn btn-primary">Check Camera</button>
+        <button onclick="takePhoto()" class="btn btn-primary">Take Photo</button>
+          <button onclick="generateImage()" class="btn btn-primary">Test All Cameras</button>
+
+      </div>
+
+      <div id="loadingSpinner" class="text-center my-3" style="display: none;">
+        <div class="spinner-border" role="status">
+            <span class="sr-only">Loading...</span>
+        </div>
+    </div>
+    
+      <div id="timestamp" class="text-muted text-center my-2"></div>
+
+      <div id="output" class="mt-4"></div>
+
+      <img id="photoDisplay" style="max-width: 100%; display: none;" />
+
+    <!-- Image display area -->
+    <div id="imageDisplayArea" class="row text-center mt-4">
+      <!-- Images will be added here by the JavaScript -->
+  </div>
+
+    </div>
+
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="../static/js/checkHealth.js"></script>
+    <script src="../static/js/displayError.js"></script>
+    <script src="../static/js/networkSettings.js"></script>
+    <script src="../static/js/ntpCheck.js"></script>
+    <script src="../static/js/updateTimestamp.js"></script>
+    <script src="../static/js/checkCamera.js"></script>
+    <script src="../static/js/generateImage.js"></script>
+    <script src="../static/js/takePhoto.js"></script>
+
+
+
+  </body>
+</html>
