@@ -7,6 +7,8 @@ import logging
 import asyncio
 import base64
 import os
+from threading import Timer
+import uuid
 
 app = FastAPI()
 
@@ -41,35 +43,74 @@ raspberry_pis = config.get('raspberry_pis', [])
 # Global variable to keep track of the last capture time
 last_capture_time = None
 
+# Global variable for session UUID and timer
+session_uuid = None
+session_timer = None
+
+def reset_session():
+    global session_uuid
+    global session_timer
+    logging.info(f"Session ended: {session_uuid}")
+    session_uuid = None
+    session_timer = None
+
+# Add a global dictionary to map client IDs to their checkout_session UUIDs
+checkout_sessions = {}
+
 class ImageData(BaseModel):
     image: str
     client_id: str
 
-@app.post("/api/receive_image")
-async def receive_image(image_data: ImageData):
-    image_bytes = base64.b64decode(image_data.image)
-    image_file = os.path.join(
-        "received_images", 
-        f"{image_data.client_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
-    )
-
-    os.makedirs(os.path.dirname(image_file), exist_ok=True)
-    with open(image_file, 'wb') as file:
-        file.write(image_bytes)
-
-    return {"status": "Image received and saved", "file_path": image_file}
-
 @app.post("/api/motion_detected")
 async def motion_detected():
     global last_capture_time
-    cooldown_period = 1  # 10 seconds cooldown
+    global session_uuid
+    global session_timer
+
+    cooldown_period = 1  # Adjust as needed
+    session_timeout = 3  # 3 seconds with no motion to end the session
 
     if last_capture_time and datetime.now() - last_capture_time < timedelta(seconds=cooldown_period):
         raise HTTPException(status_code=429, detail="Cooldown period active. Capture not triggered")
 
+    if session_timer:
+        session_timer.cancel()  # Cancel the existing timer as new motion is detected
+
+    if not session_uuid:
+        session_uuid = str(uuid.uuid4())
+        logging.info(f"New checkout_session created: {session_uuid}")  # Log new session creation
+        os.makedirs(os.path.join("received_images", session_uuid), exist_ok=True)
+
+    # Reset the timer to end the session if no motion for 3 seconds
+    session_timer = Timer(session_timeout, reset_session)
+    session_timer.start()
+
     last_capture_time = datetime.now()
     await asyncio.gather(*(trigger_frame_capture_async(pi_url) for pi_url in raspberry_pis))
     return {"status": "Frame capture triggered on all clients"}
+
+@app.post("/api/receive_image")
+async def receive_image(image_data: ImageData):
+    global session_uuid
+
+    if not session_uuid:
+        # Fallback, in case an image is received without a session
+        session_uuid = str(uuid.uuid4())
+
+    image_bytes = base64.b64decode(image_data.image)
+    image_file_path = os.path.join(
+        "received_images", 
+        session_uuid, 
+        f"{image_data.client_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+    )
+
+    os.makedirs(os.path.dirname(image_file_path), exist_ok=True)
+    with open(image_file_path, 'wb') as file:
+        file.write(image_bytes)
+
+    return {"status": "Image received and saved", "file_path": image_file_path}
+
+
 
 async def trigger_frame_capture_async(pi_url):
     async with aiohttp.ClientSession() as session:
