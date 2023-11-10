@@ -2,11 +2,16 @@ import io
 import os
 import json
 import logging
+import time
 from flask import Flask, jsonify, render_template, send_file, request
 import requests
 from datetime import datetime, timedelta
 from threading import Thread
 import base64
+import queue
+import asyncio
+import aiohttp
+import uuid
 
 app = Flask(__name__)
 
@@ -53,6 +58,11 @@ raspberry_pis = config.get('raspberry_pis', default_config['raspberry_pis'])
 
 # Global variable to keep track of the last capture time
 last_capture_time = None
+
+# Global variable to keep track of the current session and its directory
+current_session_id = None
+current_session_dir = None
+motion_last_detected_time = None
 
 @app.route('/')
 def dashboard():
@@ -112,58 +122,98 @@ def take_photo(device_id):
     
 
 
+# This will be set True when motion is detected and reset when capturing should stop
+capturing = False 
 
-    
+# Function to continuously capture frames from all Raspberry Pis
+def continuous_capture():
+    global last_capture_time, capturing
+    capturing = True
+    while capturing:
+        for pi_url in raspberry_pis:
+            try:
+                response = requests.get(f"{pi_url}/api/take_photo", timeout=5)
+                # Handle the response here as per your requirement
+            except requests.exceptions.RequestException as e:
+                logging.error(f"Failed to get continuous capture from {pi_url}: {str(e)}")
+        time.sleep(1)  # Capturing at 1 fps
+
+    # Start continuous capturing on a new thread
+    if not capturing:
+        capture_thread = Thread(target=continuous_capture)
+        capture_thread.start()
+
+    return jsonify({"status": "Continuous frame capture triggered on all clients"}), 200
+
+@app.route('/api/stop_capture', methods=['POST'])
+def stop_capture():
+    global capturing
+    capturing = False
+    return jsonify({"status": "Capture stopped on all clients"}), 200
+
+async def fetch_from_pi_async(device_id, endpoint):
+    async with aiohttp.ClientSession() as session:
+        if 0 < device_id <= len(raspberry_pis):
+            pi_url = raspberry_pis[device_id-1]
+            async with session.get(f"{pi_url}/api/{endpoint}", timeout=5) as response:
+                return await response.json()
+        else:
+            return {"error": "Invalid device_id"}
+
+
 @app.route('/api/motion_detected', methods=['POST'])
-def motion_detected():
+async def motion_detected():
     global last_capture_time
     cooldown_period = 10  # 10 seconds cooldown
 
     if last_capture_time and datetime.now() - last_capture_time < timedelta(seconds=cooldown_period):
-        # If the last capture was within the cooldown period, do not trigger a new capture
         return jsonify({"status": "Cooldown period active. Capture not triggered"}), 429
 
-    # Update the last capture time
     last_capture_time = datetime.now()
 
-    # Trigger frame capture on all Raspberry Pi devices
-    threads = []
-    for pi_url in raspberry_pis:
-        thread = Thread(target=trigger_frame_capture, args=(pi_url,))
-        thread.start()
-        threads.append(thread)
+    # Create a new session for this motion detection event
+    create_new_session()
 
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
+    await asyncio.gather(*(trigger_frame_capture_async(pi_url) for pi_url in raspberry_pis))
 
-    return jsonify({"status": "Frame capture triggered on all clients"}), 200
+    return jsonify({"status": "Frame capture triggered on all clients", "session_id": current_session_id}), 200
 
-def trigger_frame_capture(pi_url):
-    try:
-        # Sending a GET request to the client to take a photo
-        response = requests.get(f"{pi_url}/api/take_photo", timeout=5)
-        if response.status_code != 200:
-            logging.error(f"Failed to capture photo from {pi_url}")
-    except requests.exceptions.RequestException as e:
-        logging.exception(f"Error triggering frame capture on {pi_url}: {str(e)}")
 
+async def trigger_frame_capture_async(pi_url):
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(f"{pi_url}/api/take_photo", timeout=5) as response:
+                if response.status != 200:
+                    logging.error(f"Failed to capture photo from {pi_url}")
+        except Exception as e:
+            logging.exception(f"Error triggering frame capture on {pi_url}: {str(e)}")
+
+def create_new_session():
+    global current_session_id, current_session_dir
+    current_session_id = str(uuid.uuid4())
+    current_session_dir = os.path.join("sessions", current_session_id)
+    os.makedirs(current_session_dir, exist_ok=True)
+    logging.info(f"New session created: {current_session_id}, Directory: {current_session_dir}")
 
 @app.route('/api/receive_image', methods=['POST'])
-def receive_image():
-    data = request.json
+async def receive_image():
+    global current_session_dir  # Ensure the function is aware of the global variable
+
+    data = request.get_json()
     image_data = data.get('image')
     client_id = data.get('client_id', 'UnknownClient')
 
+    if not current_session_dir:
+        logging.error("No active session directory.")
+        return jsonify({"error": "No active session"}), 400
+
     if image_data:
-        image_file = os.path.join(
-            "received_images", 
-            f"{client_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
-        )
+        timestamp = datetime.now().strftime('%Y%m%d%H%M%S')
+        image_file = os.path.join(current_session_dir, f"{client_id}_{timestamp}.jpg")
+        logging.info(f"Saving image to {image_file}")  # Debugging log
 
         # Decode and save the image
         image_bytes = base64.b64decode(image_data)
-        os.makedirs(os.path.dirname(image_file), exist_ok=True)
         with open(image_file, 'wb') as file:
             file.write(image_bytes)
 
@@ -171,10 +221,9 @@ def receive_image():
     else:
         return jsonify({"status": "No image data received"}), 400
 
-
-
-
 if __name__ == '__main__':
-    # Use the host and port from the configuration
-    app.run(host=config.get('host', default_config['host']),
-            port=config.get('port', default_config['port']))
+    from hypercorn.asyncio import serve
+    from hypercorn.config import Config
+    config = Config()
+    config.bind = ["0.0.0.0:5000"]
+    asyncio.run(serve(app, config))
