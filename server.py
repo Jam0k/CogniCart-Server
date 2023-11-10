@@ -4,7 +4,7 @@ import json
 import logging
 from flask import Flask, jsonify, render_template, send_file, request
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Thread
 import base64
 
@@ -50,6 +50,9 @@ logging.basicConfig(level=logging.INFO,
 
 # Use the Raspberry Pi URLs from the configuration
 raspberry_pis = config.get('raspberry_pis', default_config['raspberry_pis'])
+
+# Global variable to keep track of the last capture time
+last_capture_time = None
 
 @app.route('/')
 def dashboard():
@@ -113,14 +116,20 @@ def take_photo(device_id):
     
 @app.route('/api/motion_detected', methods=['POST'])
 def motion_detected():
-    # This endpoint will be hit by the client Raspberry Pi when motion is detected
-    data = request.json
-    logging.info(f"Motion detected on Client {data['client_id']}. Triggering frame capture on all clients.")
+    global last_capture_time
+    cooldown_period = 10  # 10 seconds cooldown
+
+    if last_capture_time and datetime.now() - last_capture_time < timedelta(seconds=cooldown_period):
+        # If the last capture was within the cooldown period, do not trigger a new capture
+        return jsonify({"status": "Cooldown period active. Capture not triggered"}), 429
+
+    # Update the last capture time
+    last_capture_time = datetime.now()
 
     # Trigger frame capture on all Raspberry Pi devices
     threads = []
-    for pi in raspberry_pis:
-        thread = Thread(target=trigger_frame_capture, args=(pi,))
+    for pi_url in raspberry_pis:
+        thread = Thread(target=trigger_frame_capture, args=(pi_url,))
         thread.start()
         threads.append(thread)
 
@@ -138,6 +147,30 @@ def trigger_frame_capture(pi_url):
             logging.error(f"Failed to capture photo from {pi_url}")
     except requests.exceptions.RequestException as e:
         logging.exception(f"Error triggering frame capture on {pi_url}: {str(e)}")
+
+
+@app.route('/api/receive_image', methods=['POST'])
+def receive_image():
+    data = request.json
+    image_data = data.get('image')
+    client_id = data.get('client_id', 'UnknownClient')
+
+    if image_data:
+        image_file = os.path.join(
+            "received_images", 
+            f"{client_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
+        )
+
+        # Decode and save the image
+        image_bytes = base64.b64decode(image_data)
+        os.makedirs(os.path.dirname(image_file), exist_ok=True)
+        with open(image_file, 'wb') as file:
+            file.write(image_bytes)
+
+        return jsonify({"status": "Image received and saved", "file_path": image_file}), 200
+    else:
+        return jsonify({"status": "No image data received"}), 400
+
 
 
 
