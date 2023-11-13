@@ -1,5 +1,5 @@
 import json
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import aiohttp
 from datetime import datetime, timedelta
@@ -12,24 +12,23 @@ import uuid
 
 app = FastAPI()
 
-# Define paths for configuration and logs directories
+# Define and ensure existence of configuration and logs directories
 config_dir = 'config'
 logs_dir = 'logs'
-config_file_path = os.path.join(config_dir, 'config2.json')
-log_file_path = os.path.join(logs_dir, 'server.log')
+config_file_path = os.path.join(config_dir, 'config2.json')  # Config file path
+log_file_path = os.path.join(logs_dir, 'server.log')  # Log file path
 
-# Ensure the config and logs directories exist
 os.makedirs(config_dir, exist_ok=True)
 os.makedirs(logs_dir, exist_ok=True)
 
-# Load configuration from config.json
+# Load server configuration from the specified JSON file
 try:
     with open(config_file_path) as config_file:
         config = json.load(config_file)
 except FileNotFoundError:
-    raise RuntimeError("Config file not found")
+    raise RuntimeError("Config file not found")  # Raise error if config file is missing
 
-# Set up logging to file and console
+# Setup logging to both file and console
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s:%(levelname)s:%(message)s',
                     handlers=[
@@ -37,66 +36,69 @@ logging.basicConfig(level=logging.INFO,
                         logging.StreamHandler()
                     ])
 
-# Use the Raspberry Pi URLs from the configuration
+# Extract Raspberry Pi URLs from the configuration for image capture
 raspberry_pis = config.get('raspberry_pis', [])
 
-# Global variable to keep track of the last capture time
+# Global variable to keep track of the last image capture time
 last_capture_time = None
 
-# Global variable for session UUID and timer
+# Global variables for session UUID and a timer to handle session expiration
 session_uuid = None
 session_timer = None
 
 def reset_session():
-    global session_uuid
-    global session_timer
+    """Resets the current session, logging the end of session and clearing UUID and timer."""
+    global session_uuid, session_timer
     logging.info(f"Session ended: {session_uuid}")
     session_uuid = None
     session_timer = None
 
-# Add a global dictionary to map client IDs to their checkout_session UUIDs
-checkout_sessions = {}
-
 class ImageData(BaseModel):
+    """Pydantic model to define the structure of the image data received."""
     image: str
     client_id: str
 
 @app.post("/api/motion_detected")
 async def motion_detected():
-    global last_capture_time
-    global session_uuid
-    global session_timer
+    """Handles motion detection events by triggering image capture on Raspberry Pi devices."""
+    global last_capture_time, session_uuid, session_timer
 
-    cooldown_period = 1  # Adjust as needed
-    session_timeout = 3  # 3 seconds with no motion to end the session
+    cooldown_period = 1  # Time in seconds before another capture can be triggered
+    session_timeout = 3  # Time in seconds for session expiration without new motion
 
+    # Check for cooldown period
     if last_capture_time and datetime.now() - last_capture_time < timedelta(seconds=cooldown_period):
         raise HTTPException(status_code=429, detail="Cooldown period active. Capture not triggered")
 
+    # Reset the session timer if new motion is detected
     if session_timer:
-        session_timer.cancel()  # Cancel the existing timer as new motion is detected
+        session_timer.cancel()
 
+    # Create a new session if none exists
     if not session_uuid:
         session_uuid = str(uuid.uuid4())
-        logging.info(f"New checkout_session created: {session_uuid}")  # Log new session creation
+        logging.info(f"New checkout_session created: {session_uuid}")
         os.makedirs(os.path.join("received_images", session_uuid), exist_ok=True)
 
-    # Reset the timer to end the session if no motion for 3 seconds
+    # Reset the session timer for session expiration
     session_timer = Timer(session_timeout, reset_session)
     session_timer.start()
 
     last_capture_time = datetime.now()
+    # Trigger frame capture on all configured Raspberry Pi devices
     await asyncio.gather(*(trigger_frame_capture_async(pi_url) for pi_url in raspberry_pis))
     return {"status": "Frame capture triggered on all clients"}
 
 @app.post("/api/receive_image")
 async def receive_image(image_data: ImageData):
+    """Receives and saves images sent by Raspberry Pi devices."""
     global session_uuid
 
+    # Create a fallback session if an image is received without an existing session
     if not session_uuid:
-        # Fallback, in case an image is received without a session
         session_uuid = str(uuid.uuid4())
 
+    # Decode the base64 encoded image
     image_bytes = base64.b64decode(image_data.image)
     image_file_path = os.path.join(
         "received_images", 
@@ -104,18 +106,18 @@ async def receive_image(image_data: ImageData):
         f"{image_data.client_id}_{datetime.now().strftime('%Y%m%d%H%M%S')}.jpg"
     )
 
+    # Save the image to the file system
     os.makedirs(os.path.dirname(image_file_path), exist_ok=True)
     with open(image_file_path, 'wb') as file:
         file.write(image_bytes)
 
     return {"status": "Image received and saved", "file_path": image_file_path}
 
-
-
 async def trigger_frame_capture_async(pi_url):
+    """Triggers a frame capture request to a Raspberry Pi device asynchronously."""
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(f"{pi_url}/api/take_photo", timeout=5) as response:
+            async with session.get(f"{pi_url}/api/take_photo", timeout=10) as response:
                 if response.status != 200:
                     logging.error(f"Failed to capture photo from {pi_url}")
         except Exception as e:
@@ -123,9 +125,21 @@ async def trigger_frame_capture_async(pi_url):
 
 @app.post("/api/trigger_manual_capture")
 async def trigger_manual_capture():
+    """Endpoint to manually trigger frame capture on all Raspberry Pi devices."""
     await asyncio.gather(*(trigger_frame_capture_async(pi_url) for pi_url in raspberry_pis))
     return {"status": "Manual frame capture triggered on all clients"}
 
+# Dictionary to track client heartbeats
+client_heartbeats = {}
+
+@app.post("/heartbeat")
+async def handle_heartbeat(request: Request):
+    data = await request.json()
+    client_id = data.get('client_id', 'unknown_client')
+    logging.info(f"Heartbeat received from client ID: {client_id}")
+    return {"message": "Success"}
+
 if __name__ == "__main__":
+    # Start the FastAPI server with the configuration settings
     import uvicorn
     uvicorn.run(app, host=config.get('host', '0.0.0.0'), port=config.get('port', 5000))
