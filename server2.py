@@ -15,7 +15,7 @@ app = FastAPI()
 # Define paths for configuration and logs directories
 config_dir = 'config'
 logs_dir = 'logs'
-config_file_path = os.path.join(config_dir, 'config.json')
+config_file_path = os.path.join(config_dir, 'config2.json')
 log_file_path = os.path.join(logs_dir, 'server.log')
 
 # Ensure the config and logs directories exist
@@ -121,7 +121,10 @@ async def trigger_frame_capture_async(pi_url):
         except Exception as e:
             logging.exception(f"Error triggering frame capture on {pi_url}: {str(e)}")
 
-# ... Add other endpoints as needed ...
+@app.post("/api/trigger_manual_capture")
+async def trigger_manual_capture():
+    await asyncio.gather(*(trigger_frame_capture_async(pi_url) for pi_url in raspberry_pis))
+    return {"status": "Manual frame capture triggered on all clients"}
 
 if __name__ == "__main__":
     import uvicorn
